@@ -1,0 +1,28 @@
+.DS_Store
+.idea/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated demo, training, and runtime outputs
+out/
+logs/
+runs/
+outputs/
+local_train/medicine_box/images/
+local_train/medicine_box/labels/
+local_train/medicine_box/*.cache
+local_train/outputs/
+
+# Large local model and archive artifacts
+*.zip
+*.tar.gz
+*.pt
+*.onnx
+*.tflite
+*.npy
+models/*.json
+local_train/sscma_model_assistant/
+
+# Keep source, docs, small generated figures, and Arduino sketches tracked.

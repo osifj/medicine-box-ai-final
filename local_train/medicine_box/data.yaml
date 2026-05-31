@@ -1,0 +1,5 @@
+path: /Users/dep/Documents/Codex/2026-05-28/gorvevision-grovevision-at-command-arduino-grove/local_train/medicine_box
+train: images/train
+val: images/val
+names:
+  0: medicine_box
