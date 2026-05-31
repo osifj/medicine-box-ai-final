@@ -7,6 +7,8 @@
 - 电脑端独立 demo：生成多样化合成药盒图，训练轻量 detector，推理检测 `medicine_box`、`barcode`、`text`，输出 JSON、评估指标、YOLO 数据集和带框图片。
 - 合成变化：旋转、多盒、遮挡、多背景、不同药盒配色、中文/英文/商标等小字。
 - 单图 fallback：`--image path.jpg` 可以对已有图片跑同一 detector。
+- 真实图片 pipeline：面向手持、倾斜、镜像/倒置、反光、无条码药盒照片。
+- 机器学习路线：生成数据校准 fallback profile；可选 YOLOv8n 训练；真实数据可继续 fine-tune。
 - Grove 辅助脚本：保留 `scripts/grovevision_at.py`、`scripts/deploy_we2_model.py`、`scripts/run_hybrid_demo.py`，但不是默认验收路径。
 - 文档和报告：`reports/` 内保留架构、训练总结、数据计划和演讲稿。
 
@@ -87,22 +89,61 @@ Overlay 示例：
 
 说明：当前脚本中的 barcode 数字和 text 内容来自合成图生成标签，用于 demo 验证，不等同真实 OCR 或真实条码解码。
 
-## 单张图片 Fallback
+## 真实图片 Pipeline
+
+```bash
+python3 scripts/run_real_image_pipeline.py \
+  --image /path/to/image.jpg \
+  --output out/real_image_check
+```
+
+兼容旧入口：
 
 ```bash
 python3 scripts/run_host_synthetic_demo.py \
   --image /path/to/image.jpg \
-  --output out/single_image_check
+  --output out/real_image_check
 ```
 
-这会输出：
+输出：
 
 ```text
-out/single_image_check/results/<image>.json
-out/single_image_check/results/<image>_overlay.jpg
+out/real_image_check/results/<image>.json
+out/real_image_check/results/<image>_corrected.jpg
+out/real_image_check/results/<image>_overlay.jpg
 ```
 
-注意：fallback 使用合成图颜色/几何 detector。真实图片泛化能力取决于图片是否接近生成图风格。
+真实图片 JSON 示例：
+
+```json
+{
+  "orientation": "mirrored",
+  "barcode_status": "not_visible",
+  "counts": {
+    "medicine_box": 1,
+    "barcode": 0,
+    "text": 5
+  },
+  "detections": [
+    {
+      "label": "medicine_box",
+      "score": 0.93,
+      "bbox_xyxy": [120, 140, 1510, 780],
+      "bbox_xywh": [120, 140, 1390, 640],
+      "text_hint": "real image medicine box candidate"
+    },
+    {
+      "label": "text",
+      "score": 0.72,
+      "bbox_xyxy": [250, 210, 980, 310],
+      "bbox_xywh": [250, 210, 730, 100],
+      "text_hint": "text_region_1"
+    }
+  ]
+}
+```
+
+真实 pipeline 会尝试 `normal`、`rotated_180`、`mirrored`、`mirrored_rotated` 四种方向，选择得分最高方向并输出校正图。若图中无条码，`barcode` 可以是 `0`，并写入 `barcode_status: "not_visible"`。
 
 ## 评估与 YOLO 数据
 
@@ -122,17 +163,36 @@ python3 scripts/evaluate_host_synthetic_detector.py \
   --output out/host_synthetic_demo/results/eval_metrics.json
 ```
 
+训练/准备电脑端检测资产：
+
+```bash
+python3 scripts/train_host_detector.py \
+  --output out/models \
+  --dataset-output out/host_training
+```
+
+这会生成：
+
+```text
+out/models/host_detector_profile.json
+out/models/host_detector_metrics.json
+out/models/host_detector_training_report.json
+out/host_training/yolo_dataset/data.yaml
+```
+
+更真实的固定测试集评估：
+
+```bash
+python3 scripts/evaluate_realistic_synthetic.py \
+  --model out/models/host_detector_profile.json \
+  --output out/realistic_synthetic_eval
+```
+
 YOLOv8n 训练路线（可选，需要自行安装 `ultralytics`）：
 
 ```bash
 pip install ultralytics
-yolo detect train \
-  model=yolov8n.pt \
-  data=out/host_synthetic_demo/yolo_dataset/data.yaml \
-  imgsz=640 \
-  epochs=30 \
-  project=out/yolo_runs \
-  name=medicine_box_synth
+python3 scripts/train_host_detector.py --try-yolo --epochs 30
 ```
 
 真实微调路线：
@@ -173,6 +233,9 @@ python3 scripts/deploy_we2_model.py --help
 ```text
 scripts/
   run_host_synthetic_demo.py  # 默认电脑端合成 demo
+  run_real_image_pipeline.py   # 真实手持图片 pipeline
+  train_host_detector.py       # 生成数据 + 保存 fallback profile + 可选 YOLOv8n
+  evaluate_realistic_synthetic.py
   run_hybrid_demo.py          # Grove 触发 + 主机 pipeline 串联脚本
   grovevision_at.py           # Grove AT 命令 helper
   deploy_we2_model.py         # Grove WE2 模型刷写 helper
@@ -193,13 +256,16 @@ reports/
 python3 -m compileall -q scripts
 python3 -m unittest discover -s tests -v
 python3 scripts/deploy_we2_model.py --help
+python3 scripts/train_host_detector.py --train-count 12 --val-count 4 --test-count 4
 python3 scripts/run_host_synthetic_demo.py --force-train --demo-count 2
 python3 scripts/evaluate_host_synthetic_detector.py
+python3 scripts/evaluate_realistic_synthetic.py --test-count 4
 ```
 
 ## 已知限制
 
 - 默认 demo 针对生成图，保证可复现，不代表真实药盒照片泛化能力。
+- 真实图片 pipeline 是 deterministic detector + 可选 OCR scoring + 训练 profile；没有真实标注集前，不能保证所有药盒都精准。
 - 当前不要求 Grove 硬件接入，不验证串口 probe/invoke/flash。
 - 合成 demo 的 text/barcode 字符串来自生成标签，不是真实 OCR/条码解码结果。
 - 真实世界版本仍需采集真实药盒图、标注 whole-box/barcode/text，并训练更强 detector。

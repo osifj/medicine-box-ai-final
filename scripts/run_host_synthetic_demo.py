@@ -20,12 +20,13 @@ import time
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 
 REQUIRED_LABELS = ("medicine_box", "barcode", "text")
 CLASS_TO_ID = {name: index for index, name in enumerate(REQUIRED_LABELS)}
 IMAGE_SIZE = (960, 680)
+ORIENTATIONS = ("normal", "rotated_180", "mirrored", "mirrored_rotated")
 
 BRAND_TEXTS = ["康健药业", "GROVE PHARMA", "安泰制药", "HEALTH LAB", "云杉医疗"]
 MEDICINE_TEXTS = [
@@ -181,7 +182,7 @@ def rotate_bbox(box: list[int], original_size: tuple[int, int], rotated_size: tu
     return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
 
 
-def make_package(rng: random.Random, index: int) -> tuple[Image.Image, list[dict[str, Any]]]:
+def make_package(rng: random.Random, index: int, barcode_probability: float = 0.78) -> tuple[Image.Image, list[dict[str, Any]]]:
     box_w = rng.randint(420, 620)
     box_h = rng.randint(250, 360)
     package = Image.new("RGBA", (box_w + 28, box_h + 28), (0, 0, 0, 0))
@@ -228,20 +229,21 @@ def make_package(rng: random.Random, index: int) -> tuple[Image.Image, list[dict
         draw.text((tx + 10, ty + 10), content, fill=(45, 45, 45, 255), font=font_small)
         labels.append({"label": "text", "bbox_xyxy": [tx, ty, tx + tw, ty + th], "text_hint": content})
 
-    bx2 = x2 - 42
-    by2 = y2 - 54
-    bx1 = bx2 - rng.randint(150, 220)
-    by1 = by2 - rng.randint(62, 82)
-    draw.rounded_rectangle((bx1, by1, bx2, by2), radius=5, fill=barcode_fill + (255,), outline=(72, 128, 78, 255), width=2)
-    cursor = bx1 + 12
-    while cursor < bx2 - 12:
-        bar_w = rng.choice([2, 3, 4, 6])
-        gap = rng.choice([2, 3, 5])
-        draw.rectangle((cursor, by1 + 10, cursor + bar_w, by2 - 16), fill=(20, 20, 20, 255))
-        cursor += bar_w + gap
-    barcode_text = f"690{rng.randint(1000000000, 9999999999)}"
-    draw.text((bx1 + 14, by2 - 14), barcode_text, fill=(20, 20, 20, 255), font=font_small)
-    labels.append({"label": "barcode", "bbox_xyxy": [bx1, by1, bx2, by2], "text_hint": barcode_text})
+    if rng.random() < barcode_probability:
+        bx2 = x2 - 42
+        by2 = y2 - 54
+        bx1 = bx2 - rng.randint(150, 220)
+        by1 = by2 - rng.randint(62, 82)
+        draw.rounded_rectangle((bx1, by1, bx2, by2), radius=5, fill=barcode_fill + (255,), outline=(72, 128, 78, 255), width=2)
+        cursor = bx1 + 12
+        while cursor < bx2 - 12:
+            bar_w = rng.choice([2, 3, 4, 6])
+            gap = rng.choice([2, 3, 5])
+            draw.rectangle((cursor, by1 + 10, cursor + bar_w, by2 - 16), fill=(20, 20, 20, 255))
+            cursor += bar_w + gap
+        barcode_text = f"690{rng.randint(1000000000, 9999999999)}"
+        draw.text((bx1 + 14, by2 - 14), barcode_text, fill=(20, 20, 20, 255), font=font_small)
+        labels.append({"label": "barcode", "bbox_xyxy": [bx1, by1, bx2, by2], "text_hint": barcode_text})
 
     return package, labels
 
@@ -294,6 +296,61 @@ def draw_occluders(canvas: Image.Image, rng: random.Random, count: int) -> None:
             draw.ellipse((x, y, x + w, y + h), fill=color)
 
 
+def draw_hand_occlusion(canvas: Image.Image, rng: random.Random) -> None:
+    draw = ImageDraw.Draw(canvas)
+    skin = rng.choice([(206, 145, 116, 230), (184, 124, 98, 230), (224, 172, 138, 230)])
+    base_x = rng.randint(canvas.size[0] // 4, canvas.size[0] - 280)
+    y = rng.choice([0, canvas.size[1] - 120])
+    for index in range(rng.randint(3, 5)):
+        x = base_x + index * rng.randint(46, 68)
+        if y == 0:
+            box = (x, -24, x + rng.randint(54, 76), rng.randint(80, 130))
+        else:
+            box = (x, canvas.size[1] - rng.randint(115, 150), x + rng.randint(54, 78), canvas.size[1] + 24)
+        draw.rounded_rectangle(box, radius=28, fill=skin)
+
+
+def transform_box_orientation(box: list[int], width: int, height: int, orientation: str) -> list[int]:
+    x1, y1, x2, y2 = box
+    if orientation == "normal":
+        return box
+    if orientation == "rotated_180":
+        return [width - x2, height - y2, width - x1, height - y1]
+    if orientation == "mirrored":
+        return [width - x2, y1, width - x1, y2]
+    if orientation == "mirrored_rotated":
+        return [x1, height - y2, x2, height - y1]
+    raise ValueError(f"unknown orientation: {orientation}")
+
+
+def transform_image_orientation(image: Image.Image, orientation: str) -> Image.Image:
+    if orientation == "normal":
+        return image
+    if orientation == "rotated_180":
+        return image.transpose(Image.Transpose.ROTATE_180)
+    if orientation == "mirrored":
+        return image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if orientation == "mirrored_rotated":
+        return image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_180)
+    raise ValueError(f"unknown orientation: {orientation}")
+
+
+def apply_record_orientation(record: dict[str, Any], orientation: str) -> dict[str, Any]:
+    if orientation == "normal":
+        record["orientation"] = "normal"
+        return record
+    path = Path(record["image"])
+    image = Image.open(path).convert("RGB")
+    transformed = transform_image_orientation(image, orientation)
+    transformed.save(path, quality=94)
+    width = int(record["width"])
+    height = int(record["height"])
+    for label in record["labels"]:
+        label["bbox_xyxy"] = transform_box_orientation(label["bbox_xyxy"], width, height, orientation)
+    record["orientation"] = orientation
+    return record
+
+
 def generate_image(path: Path, seed: int, max_boxes: int = 3, allow_rotation: bool = True, allow_occlusion: bool = True) -> dict[str, Any]:
     rng = random.Random(seed)
     width, height = IMAGE_SIZE
@@ -314,17 +371,30 @@ def generate_image(path: Path, seed: int, max_boxes: int = 3, allow_rotation: bo
 
     if allow_occlusion:
         draw_occluders(canvas, rng, rng.randint(0, 2))
+        if rng.random() < 0.55:
+            draw_hand_occlusion(canvas, rng)
 
     merged = canvas.convert("RGB")
     arr = np.asarray(merged, dtype=np.float32)
     arr += rng.uniform(-2.5, 2.5)
     arr += np.random.default_rng(seed).normal(0, 1.6, arr.shape)
     merged = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
+    if rng.random() < 0.28:
+        merged = merged.filter(ImageFilter.GaussianBlur(radius=rng.uniform(0.2, 1.0)))
+    if rng.random() < 0.35:
+        merged = ImageEnhance.Brightness(merged).enhance(rng.uniform(0.76, 1.08))
+    if rng.random() < 0.35:
+        merged = ImageEnhance.Contrast(merged).enhance(rng.uniform(0.82, 1.18))
 
     image_path = Path(path)
     image_path.parent.mkdir(parents=True, exist_ok=True)
     merged.save(image_path, quality=94)
-    return {"image": str(image_path), "width": width, "height": height, "labels": labels}
+    record = {"image": str(image_path), "width": width, "height": height, "labels": labels}
+    if rng.random() < 0.45:
+        record = apply_record_orientation(record, rng.choice(ORIENTATIONS[1:]))
+    else:
+        record["orientation"] = "normal"
+    return record
 
 
 def generate_dataset(root: Path, count: int, seed: int, prefix: str, max_boxes: int = 3) -> list[dict[str, Any]]:
@@ -717,14 +787,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     if args.image:
-        output = ensure_dir(Path(args.output))
-        model_path = output / "synthetic_detector_profile.json"
-        if args.force_train or not model_path.exists():
-            train_records = generate_dataset(output / "train", args.train_count, args.seed, "train", max_boxes=args.max_boxes)
-            model = train_detector(train_records, model_path)
-        else:
-            model = json.loads(model_path.read_text(encoding="utf-8"))
-        run_single_image(args, model)
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_real_image_pipeline
+
+        run_real_image_pipeline.run_pipeline(
+            image_path=Path(args.image),
+            output_dir=Path(args.output),
+            model_dir=Path(args.output) / "models",
+        )
         return 0
 
     summary = run_demo(args)
