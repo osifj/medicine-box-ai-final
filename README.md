@@ -4,7 +4,9 @@
 
 ## 当前可运行内容
 
-- 电脑端独立 demo：生成合成药盒图，训练轻量 detector，推理检测 `medicine_box`、`barcode`、`text`，输出 JSON 和带框图片。
+- 电脑端独立 demo：生成多样化合成药盒图，训练轻量 detector，推理检测 `medicine_box`、`barcode`、`text`，输出 JSON、评估指标、YOLO 数据集和带框图片。
+- 合成变化：旋转、多盒、遮挡、多背景、不同药盒配色、中文/英文/商标等小字。
+- 单图 fallback：`--image path.jpg` 可以对已有图片跑同一 detector。
 - Grove 辅助脚本：保留 `scripts/grovevision_at.py`、`scripts/deploy_we2_model.py`、`scripts/run_hybrid_demo.py`，但不是默认验收路径。
 - 文档和报告：`reports/` 内保留架构、训练总结、数据计划和演讲稿。
 
@@ -30,9 +32,12 @@ PASS demo_001.jpg: medicine_box=1 barcode=1 text=3
 ```text
 out/host_synthetic_demo/
   synthetic_detector_profile.json
+  yolo_dataset/data.yaml
+  test_fixed/manifest.json
   demo/images/*.jpg
   results/*.json
   results/*_overlay.jpg
+  results/metrics.json
   results/summary.json
 ```
 
@@ -40,12 +45,17 @@ out/host_synthetic_demo/
 
 `scripts/run_host_synthetic_demo.py` 从零执行完整 host-side 流程：
 
-1. 生成合成药盒训练图和标签。
+1. 生成合成药盒训练/验证/固定测试/demo 图和标签。
 2. 从生成标签校准轻量颜色/几何 detector。
-3. 生成 demo 输入图。
-4. 推理检测整盒药盒、条码区域和文字区域。
-5. 写入结构化 JSON。
-6. 生成带框 overlay 图片。
+3. 导出标准 YOLO 数据集。
+4. 在固定测试集记录 `mAP50_proxy`、F1、漏检率和延迟。
+5. 推理检测整盒药盒、条码区域和文字区域。
+6. 写入结构化 JSON。
+7. 生成带框 overlay 图片。
+
+Overlay 示例：
+
+![Host synthetic overlay example](reports/host_synthetic_overlay_example.jpg)
 
 示例检测 JSON 包含：
 
@@ -60,13 +70,86 @@ out/host_synthetic_demo/
     {
       "label": "medicine_box",
       "score": 0.99,
-      "bbox_xyxy": [138, 71, 794, 411]
+      "bbox_xyxy": [228, 41, 749, 454],
+      "bbox_xywh": [228, 41, 521, 413],
+      "text_hint": "whole package 0"
+    },
+    {
+      "label": "barcode",
+      "score": 0.98,
+      "bbox_xyxy": [507, 296, 676, 395],
+      "bbox_xywh": [507, 296, 169, 99],
+      "text_hint": "6908087349415"
     }
   ]
 }
 ```
 
 说明：当前脚本中的 barcode 数字和 text 内容来自合成图生成标签，用于 demo 验证，不等同真实 OCR 或真实条码解码。
+
+## 单张图片 Fallback
+
+```bash
+python3 scripts/run_host_synthetic_demo.py \
+  --image /path/to/image.jpg \
+  --output out/single_image_check
+```
+
+这会输出：
+
+```text
+out/single_image_check/results/<image>.json
+out/single_image_check/results/<image>_overlay.jpg
+```
+
+注意：fallback 使用合成图颜色/几何 detector。真实图片泛化能力取决于图片是否接近生成图风格。
+
+## 评估与 YOLO 数据
+
+默认 demo 会生成固定测试集并输出：
+
+```text
+out/host_synthetic_demo/results/metrics.json
+out/host_synthetic_demo/yolo_dataset/data.yaml
+```
+
+也可以单独评估：
+
+```bash
+python3 scripts/evaluate_host_synthetic_detector.py \
+  --manifest out/host_synthetic_demo/test_fixed/manifest.json \
+  --model out/host_synthetic_demo/synthetic_detector_profile.json \
+  --output out/host_synthetic_demo/results/eval_metrics.json
+```
+
+YOLOv8n 训练路线（可选，需要自行安装 `ultralytics`）：
+
+```bash
+pip install ultralytics
+yolo detect train \
+  model=yolov8n.pt \
+  data=out/host_synthetic_demo/yolo_dataset/data.yaml \
+  imgsz=640 \
+  epochs=30 \
+  project=out/yolo_runs \
+  name=medicine_box_synth
+```
+
+真实微调路线：
+
+1. 用同一类别表标注真实图片：`0 medicine_box`, `1 barcode`, `2 text`。
+2. 保持 YOLO 目录结构：`images/train`, `images/val`, `labels/train`, `labels/val`。
+3. 先用合成数据预训练，再用真实数据继续训练：
+
+```bash
+yolo detect train \
+  model=out/yolo_runs/medicine_box_synth/weights/best.pt \
+  data=/path/to/real_medicine_box_yolo/data.yaml \
+  imgsz=640 \
+  epochs=20 \
+  project=out/yolo_runs \
+  name=medicine_box_real_finetune
+```
 
 ## Grove 端状态
 
@@ -111,6 +194,7 @@ python3 -m compileall -q scripts
 python3 -m unittest discover -s tests -v
 python3 scripts/deploy_we2_model.py --help
 python3 scripts/run_host_synthetic_demo.py --force-train --demo-count 2
+python3 scripts/evaluate_host_synthetic_detector.py
 ```
 
 ## 已知限制

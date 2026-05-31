@@ -38,6 +38,27 @@ class SyntheticDemoTests(unittest.TestCase):
             detections = demo.raw_detect(Path(image_record["image"]), model=model)
             labels = {item["label"] for item in detections}
             self.assertTrue(set(demo.REQUIRED_LABELS).issubset(labels))
+            for item in detections:
+                self.assertIn("label", item)
+                self.assertIn("score", item)
+                self.assertIn("bbox_xyxy", item)
+                self.assertIn("bbox_xywh", item)
+                self.assertIn("text_hint", item)
+
+    def test_yolo_export_and_metrics(self) -> None:
+        demo = load_script("run_host_synthetic_demo")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train = demo.generate_dataset(root / "train", count=2, seed=1, prefix="train")
+            val = demo.generate_dataset(root / "val", count=1, seed=2, prefix="val")
+            test = demo.generate_dataset(root / "test", count=1, seed=3, prefix="test")
+            model = demo.train_detector(train, root / "model.json")
+            data_yaml = demo.export_yolo_dataset({"train": train, "val": val, "test": test}, root / "yolo")
+            metrics = demo.evaluate_records(test, model)
+            self.assertTrue(data_yaml.exists())
+            self.assertIn("mAP50_proxy", metrics["overall"])
+            self.assertIn("macro_f1", metrics["overall"])
+            self.assertIn("mean_latency_ms", metrics["overall"])
 
 
 if __name__ == "__main__":
