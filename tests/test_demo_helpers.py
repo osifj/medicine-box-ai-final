@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
 from pathlib import Path
 import tempfile
 import unittest
+
+from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +87,102 @@ class SyntheticDemoTests(unittest.TestCase):
             self.assertGreaterEqual(result["counts"]["text"], 1)
             self.assertIn(result["barcode_status"], {"detected", "not_visible"})
             self.assertIn(result["orientation"], set(real.ORIENTATION_ORDER))
+            self.assertIn("quality_warnings", result)
+
+    def test_audit_yolo_dataset_valid(self) -> None:
+        audit = load_script("audit_yolo_dataset")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "labels" / "train").mkdir(parents=True)
+            Image.new("RGB", (64, 48), (240, 210, 220)).save(root / "images" / "train" / "sample.jpg")
+            (root / "labels" / "train" / "sample.txt").write_text("2 0.500000 0.500000 0.400000 0.200000\n", encoding="utf-8")
+            data_yaml = root / "data.yaml"
+            data_yaml.write_text(
+                "\n".join(
+                    [
+                        f"path: {root}",
+                        "train: images/train",
+                        "names:",
+                        "  0: medicine_box",
+                        "  1: barcode",
+                        "  2: text",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            report = audit.audit_dataset(data_yaml)
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["total_class_counts"]["text"], 1)
+
+    def test_prelabel_adds_medicine_box(self) -> None:
+        prelabel = load_script("prelabel_real_yolo_dataset")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "real"
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "labels" / "train").mkdir(parents=True)
+            image = Image.new("RGB", (160, 100), (230, 230, 225))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((20, 20, 145, 78), fill=(235, 160, 205))
+            draw.rectangle((20, 20, 145, 38), fill=(120, 25, 75))
+            image.save(root / "images" / "train" / "box.jpg")
+            (root / "labels" / "train" / "box.txt").write_text("2 0.550000 0.320000 0.420000 0.120000\n", encoding="utf-8")
+            data_yaml = root / "data.yaml"
+            data_yaml.write_text(
+                f"path: {root}\ntrain: images/train\nnames:\n  0: medicine_box\n  1: barcode\n  2: text\n",
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "prelabelled"
+            manifest = prelabel.prelabel_dataset(
+                argparse.Namespace(
+                    input=str(data_yaml),
+                    output=str(output),
+                    clean=True,
+                    image_mode="copy",
+                    overwrite_medicine_box=False,
+                    add_barcode=False,
+                    min_medicine_score=0.18,
+                )
+            )
+            labels = (output / "labels" / "train" / "box.txt").read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any(line.startswith("0 ") for line in labels))
+            self.assertTrue(any(line.startswith("2 ") for line in labels))
+            self.assertEqual(manifest["splits"][0]["added_medicine_box"], 1)
+
+    def test_build_mixed_dataset(self) -> None:
+        builder = load_script("build_host_training_dataset")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            (real / "images" / "train").mkdir(parents=True)
+            (real / "images" / "val").mkdir(parents=True)
+            (real / "labels" / "train").mkdir(parents=True)
+            (real / "labels" / "val").mkdir(parents=True)
+            Image.new("RGB", (64, 48), (240, 190, 215)).save(real / "images" / "train" / "r0.jpg")
+            Image.new("RGB", (64, 48), (240, 190, 215)).save(real / "images" / "val" / "r1.jpg")
+            (real / "labels" / "train" / "r0.txt").write_text("0 0.5 0.5 0.8 0.6\n2 0.5 0.4 0.3 0.1\n", encoding="utf-8")
+            (real / "labels" / "val" / "r1.txt").write_text("0 0.5 0.5 0.8 0.6\n2 0.5 0.4 0.3 0.1\n", encoding="utf-8")
+            real_yaml = real / "data.yaml"
+            real_yaml.write_text(
+                f"path: {real}\ntrain: images/train\nval: images/val\nnames:\n  0: medicine_box\n  1: barcode\n  2: text\n",
+                encoding="utf-8",
+            )
+            manifest = builder.build_mixed_dataset(
+                argparse.Namespace(
+                    output=str(root / "mixed" / "yolo_dataset"),
+                    real=str(real_yaml),
+                    train_count=1,
+                    val_count=1,
+                    test_count=1,
+                    max_boxes=1,
+                    seed=55,
+                    real_image_mode="copy",
+                    clean=True,
+                )
+            )
+            self.assertEqual(manifest["audit"]["status"], "ok")
+            self.assertGreaterEqual(manifest["audit"]["total_class_counts"]["medicine_box"], 3)
 
 
 if __name__ == "__main__":

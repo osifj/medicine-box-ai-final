@@ -1,0 +1,34 @@
+{
+  "source_data_yaml": "data/real_labelimg_yolo/data.yaml",
+  "data_yaml": "data/real_labelimg_yolo_prelabelled/data.yaml",
+  "target_classes": [
+    "medicine_box",
+    "barcode",
+    "text"
+  ],
+  "policy": "medicine_box labels are auto-prelabels from color/text geometry; barcode labels are added only when --add-barcode is set and detector confidence is high.",
+  "splits": [
+    {
+      "split": "train",
+      "images": 76,
+      "existing_medicine_box": 0,
+      "added_medicine_box": 76,
+      "added_barcode": 0,
+      "medicine_box_methods": {
+        "color_segmentation_contains_text": 76
+      },
+      "image_mode": "symlink"
+    },
+    {
+      "split": "val",
+      "images": 20,
+      "existing_medicine_box": 0,
+      "added_medicine_box": 20,
+      "added_barcode": 0,
+      "medicine_box_methods": {
+        "color_segmentation_contains_text": 20
+      },
+      "image_mode": "symlink"
+    }
+  ]
+}

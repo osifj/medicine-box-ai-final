@@ -145,6 +145,16 @@ out/real_image_check/results/<image>_overlay.jpg
 
 真实 pipeline 会尝试 `normal`、`rotated_180`、`mirrored`、`mirrored_rotated` 四种方向，选择得分最高方向并输出校正图。若图中无条码，`barcode` 可以是 `0`，并写入 `barcode_status: "not_visible"`。
 
+若本机安装了 `tesseract` 且含 `eng+chi_sim` 语言包，真实 pipeline 会用 OCR TSV 词框增强文字区域检测；没有 OCR 时自动退回几何/边缘检测。JSON 还会写入：
+
+```text
+medicine_box_method
+quality_warnings
+pipeline_mode
+ocr_available
+ocr_lines
+```
+
 ## 评估与 YOLO 数据
 
 默认 demo 会生成固定测试集并输出：
@@ -168,7 +178,8 @@ python3 scripts/evaluate_host_synthetic_detector.py \
 ```bash
 python3 scripts/train_host_detector.py \
   --output out/models \
-  --dataset-output out/host_training
+  --dataset-output out/host_training \
+  --build-mixed
 ```
 
 这会生成：
@@ -178,6 +189,7 @@ out/models/host_detector_profile.json
 out/models/host_detector_metrics.json
 out/models/host_detector_training_report.json
 out/host_training/yolo_dataset/data.yaml
+out/host_training_mixed/yolo_dataset/data.yaml
 ```
 
 ## 导入旧 LabelImg 真实标注
@@ -210,6 +222,68 @@ val:   20 images, 60 text boxes
 ```
 
 注意：这批 LabelImg 标注实际只有 `text` 框，没有 `medicine_box` 整盒框，也没有 barcode 框。它已经被训练脚本自动识别，并写入 `out/models/host_detector_training_report.json`。可单独用于 YOLO 文本区域微调：
+
+已增加审计、自动补标和融合训练数据流程：
+
+```bash
+python3 scripts/audit_yolo_dataset.py \
+  --data data/real_labelimg_yolo/data.yaml \
+  --output out/audit_real_labelimg.json
+
+python3 scripts/prelabel_real_yolo_dataset.py \
+  --clean \
+  --input data/real_labelimg_yolo/data.yaml \
+  --output data/real_labelimg_yolo_prelabelled
+
+python3 scripts/audit_yolo_dataset.py \
+  --data data/real_labelimg_yolo_prelabelled/data.yaml \
+  --output out/audit_real_labelimg_prelabelled.json
+```
+
+自动补标后统计：
+
+```text
+train: 76 images, 76 medicine_box boxes, 228 text boxes, 0 barcode boxes
+val:   20 images, 20 medicine_box boxes, 60 text boxes, 0 barcode boxes
+```
+
+说明：`medicine_box` 是自动预标注，不等同人工真值；`barcode` 不自动伪造，只有显式 `--add-barcode` 且高置信检测时才会加入。
+
+构建合成+真实融合 YOLO 数据集：
+
+```bash
+python3 scripts/build_host_training_dataset.py \
+  --clean \
+  --real data/real_labelimg_yolo_prelabelled/data.yaml \
+  --output out/host_training_mixed/yolo_dataset
+```
+
+真实 LabelImg pipeline 评估：
+
+```bash
+python3 scripts/evaluate_real_labelimg_pipeline.py \
+  --data data/real_labelimg_yolo_prelabelled/data.yaml \
+  --split val \
+  --output out/real_labelimg_eval/metrics_no_ocr.json
+
+python3 scripts/evaluate_real_labelimg_pipeline.py \
+  --data data/real_labelimg_yolo_prelabelled/data.yaml \
+  --split val \
+  --output out/real_labelimg_eval/metrics_ocr.json \
+  --ocr
+```
+
+最近本机验证摘要：
+
+```text
+prelabel audit: ok, 384 boxes, 0 problems
+mixed audit: ok, 624 boxes, 0 problems
+real val no OCR: macro_f1=0.5444, mAP50_proxy=0.5044
+real val OCR:    macro_f1=0.6278, mAP50_proxy=0.5367
+mirrored sample: orientation=mirrored, medicine_box=1, text=6, barcode_status=not_visible
+```
+
+可单独用于 YOLO 文本区域微调：
 
 ```bash
 yolo detect train \
@@ -277,6 +351,10 @@ scripts/
   run_real_image_pipeline.py   # 真实手持图片 pipeline
   train_host_detector.py       # 生成数据 + 保存 fallback profile + 可选 YOLOv8n
   import_labelimg_dataset.py   # 导入旧 LabelImg YOLO 标注
+  audit_yolo_dataset.py        # 审计 YOLO 标签/类别/越界/缺图
+  prelabel_real_yolo_dataset.py # 给真实旧数据补 medicine_box 预标注
+  build_host_training_dataset.py # 合成+真实融合 YOLO 数据集
+  evaluate_real_labelimg_pipeline.py # 真实 LabelImg pipeline 指标
   evaluate_realistic_synthetic.py
   run_hybrid_demo.py          # Grove 触发 + 主机 pipeline 串联脚本
   grovevision_at.py           # Grove AT 命令 helper
@@ -295,12 +373,18 @@ reports/
 ## 验证命令
 
 ```bash
-python3 -m compileall -q scripts
+python3 -m compileall -q scripts tests
 python3 -m unittest discover -s tests -v
 python3 scripts/deploy_we2_model.py --help
 python3 scripts/import_labelimg_dataset.py --clean --output data/real_labelimg_yolo
-python3 scripts/train_host_detector.py --train-count 12 --val-count 4 --test-count 4
+python3 scripts/audit_yolo_dataset.py --data data/real_labelimg_yolo/data.yaml
+python3 scripts/prelabel_real_yolo_dataset.py --clean
+python3 scripts/audit_yolo_dataset.py --data data/real_labelimg_yolo_prelabelled/data.yaml
+python3 scripts/build_host_training_dataset.py --clean --train-count 12 --val-count 4 --test-count 4
+python3 scripts/train_host_detector.py --train-count 12 --val-count 4 --test-count 4 --build-mixed
 python3 scripts/run_host_synthetic_demo.py --force-train --demo-count 2
+python3 scripts/run_real_image_pipeline.py --image data/real_labelimg_yolo/images/train/frame_00059.jpg --output out/real_frame59_check
+python3 scripts/evaluate_real_labelimg_pipeline.py --data data/real_labelimg_yolo_prelabelled/data.yaml --split val
 python3 scripts/evaluate_host_synthetic_detector.py
 python3 scripts/evaluate_realistic_synthetic.py --test-count 4
 ```
@@ -308,7 +392,9 @@ python3 scripts/evaluate_realistic_synthetic.py --test-count 4
 ## 已知限制
 
 - 默认 demo 针对生成图，保证可复现，不代表真实药盒照片泛化能力。
-- 真实图片 pipeline 是 deterministic detector + 可选 OCR scoring + 训练 profile；没有真实标注集前，不能保证所有药盒都精准。
+- 真实图片 pipeline 是 deterministic detector + 可选 OCR text boxes + 训练 profile；没有足够真实人工 `medicine_box/barcode/text` 标注前，不能保证所有药盒都精准。
+- `data/real_labelimg_yolo_prelabelled` 的 `medicine_box` 是自动预标注，适合 warm-start 和检查，不应当当作最终人工真值。
+- 当前真实 LabelImg 数据没有 barcode 框；真实 pipeline 对 barcode 采用保守策略，避免把文字误报成条码。
 - 当前不要求 Grove 硬件接入，不验证串口 probe/invoke/flash。
 - 合成 demo 的 text/barcode 字符串来自生成标签，不是真实 OCR/条码解码结果。
 - 真实世界版本仍需采集真实药盒图、标注 whole-box/barcode/text，并训练更强 detector。

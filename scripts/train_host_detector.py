@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build_host_training_dataset as mixed_builder  # noqa: E402
 import run_host_synthetic_demo as demo  # noqa: E402
 
 
@@ -32,11 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--try-yolo", action="store_true", help="Run YOLOv8n training if ultralytics is installed")
     parser.add_argument("--try-yolo-real", action="store_true", help="Run YOLOv8n on imported real LabelImg data")
     parser.add_argument("--real-yolo", default="data/real_labelimg_yolo/data.yaml")
+    parser.add_argument("--real-prelabelled-yolo", default="data/real_labelimg_yolo_prelabelled/data.yaml")
+    parser.add_argument("--build-mixed", action="store_true", help="Build synthetic + real-prelabelled YOLO dataset")
+    parser.add_argument("--mixed-output", default="out/host_training_mixed/yolo_dataset")
+    parser.add_argument("--try-yolo-mixed", action="store_true", help="Run YOLOv8n on the mixed dataset")
     parser.add_argument("--epochs", type=int, default=20)
     return parser
 
 
-def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int) -> dict:
+def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int, run_name: str) -> dict:
     if not shutil_which("yolo"):
         return {"status": "skipped", "reason": "ultralytics yolo command not found"}
     project = output_dir / "yolo"
@@ -49,7 +54,7 @@ def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int) -> dict:
         "imgsz=640",
         f"epochs={epochs}",
         f"project={project}",
-        "name=medicine_box_synth",
+        f"name={run_name}",
     ]
     started = time.perf_counter()
     result = subprocess.run(cmd, text=True, capture_output=True, check=False)
@@ -140,17 +145,51 @@ def main() -> int:
         "metrics": metrics,
         "machine_learning_role": (
             "Fallback profile is learned/calibrated from generated labels. "
-            "YOLOv8n training is supported as the stronger ML route when ultralytics is installed."
+            "YOLOv8n training is supported as the stronger ML route when ultralytics is installed. "
+            "Mixed synthetic+real-prelabelled data is supported for real-photo adaptation."
         ),
         "yolo": {"status": "not_requested"},
     }
     real_yolo_path = Path(args.real_yolo)
     real_yolo_summary = summarize_yolo_dataset(real_yolo_path)
     training_report["real_labelimg_yolo"] = real_yolo_summary
+    real_prelabelled_path = Path(args.real_prelabelled_yolo)
+    training_report["real_prelabelled_yolo"] = summarize_yolo_dataset(real_prelabelled_path)
+    mixed_report: dict[str, Any] = {"status": "not_requested"}
+    if args.build_mixed:
+        mixed_args = argparse.Namespace(
+            output=args.mixed_output,
+            real=args.real_prelabelled_yolo,
+            train_count=args.train_count,
+            val_count=args.val_count,
+            test_count=args.test_count,
+            max_boxes=args.max_boxes,
+            seed=args.seed,
+            real_image_mode="symlink",
+            clean=True,
+        )
+        mixed_report = mixed_builder.build_mixed_dataset(mixed_args)
+    training_report["mixed_yolo"] = mixed_report
     if args.try_yolo:
-        training_report["yolo"] = try_yolo_train(data_yaml, output_dir, args.epochs)
+        training_report["yolo"] = try_yolo_train(data_yaml, output_dir, args.epochs, "medicine_box_synth")
     if args.try_yolo_real:
-        training_report["yolo_real"] = try_yolo_train(real_yolo_path, output_dir, args.epochs)
+        training_report["yolo_real"] = try_yolo_train(real_yolo_path, output_dir, args.epochs, "real_labelimg_text")
+    if args.try_yolo_mixed:
+        mixed_yaml = Path(args.mixed_output) / "data.yaml"
+        if not mixed_yaml.exists() and not args.build_mixed:
+            mixed_args = argparse.Namespace(
+                output=args.mixed_output,
+                real=args.real_prelabelled_yolo,
+                train_count=args.train_count,
+                val_count=args.val_count,
+                test_count=args.test_count,
+                max_boxes=args.max_boxes,
+                seed=args.seed,
+                real_image_mode="symlink",
+                clean=True,
+            )
+            training_report["mixed_yolo"] = mixed_builder.build_mixed_dataset(mixed_args)
+        training_report["yolo_mixed"] = try_yolo_train(mixed_yaml, output_dir, args.epochs, "medicine_box_mixed")
 
     report_path = output_dir / "host_detector_training_report.json"
     report_path.write_text(json.dumps(training_report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -170,8 +209,18 @@ def main() -> int:
         print(f"Imported real LabelImg YOLO: {real_yolo_path}")
         for split, info in real_yolo_summary["splits"].items():
             print(f"  {split}: labels={info['labels']} boxes={info['boxes']} class_counts={info['class_counts']}")
+    pre = training_report["real_prelabelled_yolo"]
+    if pre["status"] == "available":
+        print(f"Prelabelled real YOLO: {real_prelabelled_path}")
+        for split, info in pre["splits"].items():
+            print(f"  {split}: labels={info['labels']} boxes={info['boxes']} class_counts={info['class_counts']}")
+    if training_report["mixed_yolo"].get("status") == "completed":
+        print(f"Mixed YOLO: {training_report['mixed_yolo']['data_yaml']}")
+        print(f"  audit={training_report['mixed_yolo']['audit']}")
     if args.try_yolo_real:
         print(f"YOLO real: {training_report['yolo_real']['status']}")
+    if args.try_yolo_mixed:
+        print(f"YOLO mixed: {training_report['yolo_mixed']['status']}")
     return 0
 
 
