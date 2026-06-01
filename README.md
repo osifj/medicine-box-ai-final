@@ -180,6 +180,47 @@ out/models/host_detector_training_report.json
 out/host_training/yolo_dataset/data.yaml
 ```
 
+## 导入旧 LabelImg 真实标注
+
+已从旧项目导入：
+
+```text
+/Users/dep/Projects/New_project/captures/host_session_001
+```
+
+导入后路径：
+
+```text
+data/real_labelimg_yolo/data.yaml
+data/real_labelimg_yolo/manifest.json
+```
+
+类别映射：
+
+```text
+旧 0 barcode -> 新 1 barcode
+旧 1 text    -> 新 2 text
+```
+
+当前导入统计：
+
+```text
+train: 76 images, 228 text boxes
+val:   20 images, 60 text boxes
+```
+
+注意：这批 LabelImg 标注实际只有 `text` 框，没有 `medicine_box` 整盒框，也没有 barcode 框。它已经被训练脚本自动识别，并写入 `out/models/host_detector_training_report.json`。可单独用于 YOLO 文本区域微调：
+
+```bash
+yolo detect train \
+  model=out/yolo_runs/medicine_box_synth/weights/best.pt \
+  data=data/real_labelimg_yolo/data.yaml \
+  imgsz=640 \
+  epochs=20 \
+  project=out/yolo_runs \
+  name=real_labelimg_text_finetune
+```
+
 更真实的固定测试集评估：
 
 ```bash
@@ -235,6 +276,7 @@ scripts/
   run_host_synthetic_demo.py  # 默认电脑端合成 demo
   run_real_image_pipeline.py   # 真实手持图片 pipeline
   train_host_detector.py       # 生成数据 + 保存 fallback profile + 可选 YOLOv8n
+  import_labelimg_dataset.py   # 导入旧 LabelImg YOLO 标注
   evaluate_realistic_synthetic.py
   run_hybrid_demo.py          # Grove 触发 + 主机 pipeline 串联脚本
   grovevision_at.py           # Grove AT 命令 helper
@@ -256,6 +298,7 @@ reports/
 python3 -m compileall -q scripts
 python3 -m unittest discover -s tests -v
 python3 scripts/deploy_we2_model.py --help
+python3 scripts/import_labelimg_dataset.py --clean --output data/real_labelimg_yolo
 python3 scripts/train_host_detector.py --train-count 12 --val-count 4 --test-count 4
 python3 scripts/run_host_synthetic_demo.py --force-train --demo-count 2
 python3 scripts/evaluate_host_synthetic_detector.py

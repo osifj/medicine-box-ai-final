@@ -28,6 +28,18 @@ class HybridParsingTests(unittest.TestCase):
 
 
 class SyntheticDemoTests(unittest.TestCase):
+    def test_import_labelimg_class_mapping(self) -> None:
+        importer = load_script("import_labelimg_dataset")
+        old_classes = ["barcode", "text"]
+        self.assertEqual(
+            importer.map_label_line("0 0.5 0.5 0.2 0.1", old_classes),
+            "1 0.5 0.5 0.2 0.1",
+        )
+        self.assertEqual(
+            importer.map_label_line("1 0.5 0.5 0.2 0.1", old_classes),
+            "2 0.5 0.5 0.2 0.1",
+        )
+
     def test_synthetic_demo_detects_required_labels(self) -> None:
         demo = load_script("run_host_synthetic_demo")
         with tempfile.TemporaryDirectory() as tmp:

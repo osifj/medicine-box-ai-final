@@ -1,0 +1,42 @@
+{
+  "source": "/Users/dep/Projects/New_project/captures/host_session_001",
+  "source_labels": "/Users/dep/Projects/New_project/captures/host_session_001/labels",
+  "source_classes": [
+    "barcode",
+    "text"
+  ],
+  "target_classes": [
+    "medicine_box",
+    "barcode",
+    "text"
+  ],
+  "class_mapping": {
+    "0": 1,
+    "1": 2
+  },
+  "warning": "Imported labels are old LabelImg annotations. Current source contains text boxes only; medicine_box/barcode may be absent.",
+  "splits": [
+    {
+      "split": "train",
+      "images": 76,
+      "boxes": 228,
+      "class_counts": {
+        "medicine_box": 0,
+        "barcode": 0,
+        "text": 228
+      },
+      "skipped": 0
+    },
+    {
+      "split": "val",
+      "images": 20,
+      "boxes": 60,
+      "class_counts": {
+        "medicine_box": 0,
+        "barcode": 0,
+        "text": 60
+      },
+      "skipped": 0
+    }
+  ]
+}
