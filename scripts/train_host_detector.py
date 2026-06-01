@@ -46,13 +46,13 @@ def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int, run_name: str
     yolo = yolo_command()
     if not yolo:
         return {"status": "skipped", "reason": "ultralytics yolo command not found"}
-    project = output_dir / "yolo"
+    project = (output_dir / "yolo").resolve()
     cmd = [
         yolo,
         "detect",
         "train",
         "model=yolov8n.pt",
-        f"data={data_yaml}",
+        f"data={data_yaml.resolve()}",
         "imgsz=640",
         f"epochs={epochs}",
         f"project={project}",
