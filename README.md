@@ -306,8 +306,8 @@ python3 scripts/evaluate_realistic_synthetic.py \
 YOLOv8n 训练路线（可选，需要自行安装 `ultralytics`）：
 
 ```bash
-pip install ultralytics
-python3 scripts/train_host_detector.py --try-yolo --epochs 30
+python3 -m pip install -r requirements-yolo.txt
+python3 scripts/train_host_detector.py --build-mixed --try-yolo-mixed --epochs 30 --yolo-device mps
 ```
 
 真实微调路线：

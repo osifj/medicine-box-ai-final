@@ -79,7 +79,7 @@ def build_mixed_dataset(args: argparse.Namespace) -> dict[str, Any]:
     real_yaml = Path(args.real).expanduser()
     if real_yaml.exists():
         sources.append(copy_yolo_source(real_yaml, output, "real", args.real_image_mode, include_splits=("train", "val")))
-    data_yaml = yolo.write_data_yaml(output, include_test=True)
+    data_yaml = yolo.write_data_yaml(output, include_test=True, absolute_path=True)
     audit = audit_yolo_dataset.audit_dataset(data_yaml)
     manifest = {
         "status": "completed",

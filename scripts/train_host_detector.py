@@ -37,16 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-mixed", action="store_true", help="Build synthetic + real-prelabelled YOLO dataset")
     parser.add_argument("--mixed-output", default="out/host_training_mixed/yolo_dataset")
     parser.add_argument("--try-yolo-mixed", action="store_true", help="Run YOLOv8n on the mixed dataset")
+    parser.add_argument("--yolo-device", default="", help="Optional Ultralytics device, e.g. cpu, mps, 0")
     parser.add_argument("--epochs", type=int, default=20)
     return parser
 
 
-def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int, run_name: str) -> dict:
-    if not shutil_which("yolo"):
+def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int, run_name: str, device: str = "") -> dict:
+    yolo = yolo_command()
+    if not yolo:
         return {"status": "skipped", "reason": "ultralytics yolo command not found"}
     project = output_dir / "yolo"
     cmd = [
-        "yolo",
+        yolo,
         "detect",
         "train",
         "model=yolov8n.pt",
@@ -56,6 +58,8 @@ def try_yolo_train(data_yaml: Path, output_dir: Path, epochs: int, run_name: str
         f"project={project}",
         f"name={run_name}",
     ]
+    if device:
+        cmd.append(f"device={device}")
     started = time.perf_counter()
     result = subprocess.run(cmd, text=True, capture_output=True, check=False)
     return {
@@ -118,6 +122,13 @@ def shutil_which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def yolo_command() -> str | None:
+    local = Path(sys.executable).with_name("yolo")
+    if local.exists():
+        return str(local)
+    return shutil_which("yolo")
+
+
 def main() -> int:
     args = build_parser().parse_args()
     output_dir = demo.ensure_dir(Path(args.output))
@@ -171,9 +182,9 @@ def main() -> int:
         mixed_report = mixed_builder.build_mixed_dataset(mixed_args)
     training_report["mixed_yolo"] = mixed_report
     if args.try_yolo:
-        training_report["yolo"] = try_yolo_train(data_yaml, output_dir, args.epochs, "medicine_box_synth")
+        training_report["yolo"] = try_yolo_train(data_yaml, output_dir, args.epochs, "medicine_box_synth", args.yolo_device)
     if args.try_yolo_real:
-        training_report["yolo_real"] = try_yolo_train(real_yolo_path, output_dir, args.epochs, "real_labelimg_text")
+        training_report["yolo_real"] = try_yolo_train(real_yolo_path, output_dir, args.epochs, "real_labelimg_text", args.yolo_device)
     if args.try_yolo_mixed:
         mixed_yaml = Path(args.mixed_output) / "data.yaml"
         if not mixed_yaml.exists() and not args.build_mixed:
@@ -189,7 +200,7 @@ def main() -> int:
                 clean=True,
             )
             training_report["mixed_yolo"] = mixed_builder.build_mixed_dataset(mixed_args)
-        training_report["yolo_mixed"] = try_yolo_train(mixed_yaml, output_dir, args.epochs, "medicine_box_mixed")
+        training_report["yolo_mixed"] = try_yolo_train(mixed_yaml, output_dir, args.epochs, "medicine_box_mixed", args.yolo_device)
 
     report_path = output_dir / "host_detector_training_report.json"
     report_path.write_text(json.dumps(training_report, ensure_ascii=False, indent=2), encoding="utf-8")
