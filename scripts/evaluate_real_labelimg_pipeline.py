@@ -35,19 +35,48 @@ def labels_for_image(data_yaml: Path, split: str, image_path: Path, config: dict
     return labels
 
 
-def evaluate_images(data_yaml: Path, split: str, iou_threshold: float, use_ocr: bool = False) -> dict[str, Any]:
+def predict_candidate(
+    image: Image.Image,
+    yolo_model: Any | None,
+    yolo_device: str,
+    use_ocr: bool,
+) -> tuple[dict[str, Any], str]:
+    if yolo_model is not None:
+        candidate = real_pipeline.detect_yolo_candidate(image, "normal", yolo_model, yolo_device=yolo_device, use_ocr=use_ocr)
+        if (
+            candidate.get("yolo_detection_count", 0) > 0
+            and candidate["text_count"] >= 1
+            and real_pipeline.label_count(candidate["detections"], "medicine_box") >= 1
+        ):
+            return candidate, "yolo_hybrid"
+    return real_pipeline.detect_candidate(image, "normal", use_ocr=use_ocr), "deterministic_fallback"
+
+
+def evaluate_images(
+    data_yaml: Path,
+    split: str,
+    iou_threshold: float,
+    use_ocr: bool = False,
+    yolo_model_path: Path | None = None,
+    yolo_device: str = "",
+    no_yolo: bool = False,
+    prefer_yolo: bool = True,
+) -> dict[str, Any]:
     config = yolo.parse_data_yaml(data_yaml)
     per_class = {label: {"tp": 0, "fp": 0, "fn": 0, "ious": []} for label in yolo.CLASS_NAMES}
     latencies: list[float] = []
     image_reports: list[dict[str, Any]] = []
+    yolo_model, yolo_status = real_pipeline.load_yolo_detector(yolo_model_path, disabled=no_yolo or not prefer_yolo)
+    backend_counts = {"yolo_hybrid": 0, "deterministic_fallback": 0}
 
     for image_path in yolo.image_files(data_yaml, split, config):
         labels = labels_for_image(data_yaml, split, image_path, config)
         image = Image.open(image_path).convert("RGB")
         start = time.perf_counter()
-        candidate = real_pipeline.detect_candidate(image, "normal", use_ocr=use_ocr)
+        candidate, backend = predict_candidate(image, yolo_model, yolo_device, use_ocr)
         latency_ms = (time.perf_counter() - start) * 1000
         latencies.append(latency_ms)
+        backend_counts[backend] += 1
         detections = candidate["detections"]
         counts = {name: sum(1 for det in detections if det["label"] == name) for name in yolo.CLASS_NAMES}
         expected = {name: sum(1 for item in labels if item["label"] == name) for name in yolo.CLASS_NAMES}
@@ -78,6 +107,7 @@ def evaluate_images(data_yaml: Path, split: str, iou_threshold: float, use_ocr: 
                 "image": str(image_path),
                 "counts": counts,
                 "expected_counts": expected,
+                "model_backend": backend,
                 "latency_ms": round(latency_ms, 2),
             }
         )
@@ -86,6 +116,8 @@ def evaluate_images(data_yaml: Path, split: str, iou_threshold: float, use_ocr: 
         "split": split,
         "iou_threshold": iou_threshold,
         "use_ocr": use_ocr,
+        "model_backend_counts": backend_counts,
+        "yolo": yolo_status,
         "per_class": {},
         "overall": {},
         "images": image_reports,
@@ -128,15 +160,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate real-image pipeline on a YOLO dataset")
     parser.add_argument("--data", default="data/real_labelimg_yolo_prelabelled/data.yaml")
     parser.add_argument("--split", default="val")
-    parser.add_argument("--output", default="out/real_labelimg_eval/metrics.json")
+    parser.add_argument("--output", default="out/real_yolo_pipeline_eval/metrics.json")
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--ocr", action="store_true", help="Enable OCR during evaluation; slower, not needed for box metrics")
+    parser.add_argument("--yolo-model", default="", help="Path to YOLOv8 best.pt; defaults to final/smoke weight")
+    parser.add_argument("--yolo-device", default="", help="YOLO device, for example mps/cpu/cuda")
+    parser.add_argument("--prefer-yolo", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--no-yolo", action="store_true", help="Disable YOLO during evaluation")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    metrics = evaluate_images(Path(args.data), args.split, args.iou_threshold, use_ocr=args.ocr)
+    metrics = evaluate_images(
+        Path(args.data),
+        args.split,
+        args.iou_threshold,
+        use_ocr=args.ocr,
+        yolo_model_path=Path(args.yolo_model) if args.yolo_model else None,
+        yolo_device=args.yolo_device,
+        no_yolo=args.no_yolo,
+        prefer_yolo=args.prefer_yolo,
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -144,7 +189,8 @@ def main() -> int:
         f"Real LabelImg eval: images={metrics['overall']['images']} "
         f"macro_f1={metrics['overall']['macro_f1']} "
         f"mAP50_proxy={metrics['overall']['mAP50_proxy']} "
-        f"mean_latency_ms={metrics['overall']['mean_latency_ms']}"
+        f"mean_latency_ms={metrics['overall']['mean_latency_ms']} "
+        f"backend_counts={metrics['model_backend_counts']}"
     )
     print(f"  metrics: {output}")
     return 0

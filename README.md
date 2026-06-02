@@ -18,6 +18,8 @@
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
+# 可选：启用 YOLOv8n 训练/推理
+python3 -m pip install -r requirements-yolo.txt
 
 python3 scripts/run_host_synthetic_demo.py --force-train
 ```
@@ -94,7 +96,27 @@ Overlay 示例：
 ```bash
 python3 scripts/run_real_image_pipeline.py \
   --image /path/to/image.jpg \
-  --output out/real_image_check
+  --output out/real_image_check \
+  --yolo-device mps
+```
+
+若已有指定 YOLO 权重：
+
+```bash
+python3 scripts/run_real_image_pipeline.py \
+  --image /path/to/image.jpg \
+  --output out/real_image_check \
+  --yolo-model out/models_yolo_final/yolo/medicine_box_mixed/weights/best.pt \
+  --yolo-device mps
+```
+
+强制不用 YOLO，仅跑确定性 fallback：
+
+```bash
+python3 scripts/run_real_image_pipeline.py \
+  --image /path/to/image.jpg \
+  --output out/real_image_check_no_yolo \
+  --no-yolo
 ```
 
 兼容旧入口：
@@ -117,8 +139,13 @@ out/real_image_check/results/<image>_overlay.jpg
 
 ```json
 {
+  "model_backend": "yolo_hybrid",
+  "yolo_model_path": "out/models_yolo_final/yolo/medicine_box_mixed/weights/best.pt",
   "orientation": "mirrored",
   "barcode_status": "not_visible",
+  "quality_warnings": [
+    "barcode_not_visible_or_not_detected"
+  ],
   "counts": {
     "medicine_box": 1,
     "barcode": 0,
@@ -130,25 +157,36 @@ out/real_image_check/results/<image>_overlay.jpg
       "score": 0.93,
       "bbox_xyxy": [120, 140, 1510, 780],
       "bbox_xywh": [120, 140, 1390, 640],
-      "text_hint": "real image medicine box candidate"
+      "text_hint": "yolo_medicine_box",
+      "source": "yolo"
     },
     {
       "label": "text",
       "score": 0.72,
       "bbox_xyxy": [250, 210, 980, 310],
       "bbox_xywh": [250, 210, 730, 100],
-      "text_hint": "text_region_1"
+      "text_hint": "text_region_1",
+      "source": "real_visual_detector"
     }
   ]
 }
 ```
 
-真实 pipeline 会尝试 `normal`、`rotated_180`、`mirrored`、`mirrored_rotated` 四种方向，选择得分最高方向并输出校正图。若图中无条码，`barcode` 可以是 `0`，并写入 `barcode_status: "not_visible"`。
+真实 pipeline 会尝试 `normal`、`rotated_180`、`mirrored`、`mirrored_rotated` 四种方向，选择得分最高方向并输出校正图。默认优先加载：
+
+```text
+out/models_yolo_final/yolo/medicine_box_mixed/weights/best.pt
+out/models_yolo_path_smoke/yolo/medicine_box_mixed/weights/best.pt
+```
+
+YOLO 可用时，`model_backend` 为 `yolo_hybrid`：YOLO 框优先，若 YOLO 漏掉整盒或文字框，会用确定性视觉 detector 补框。YOLO 不可用、权重缺失或传入 `--no-yolo` 时，自动退回 `deterministic_fallback`。若图中无条码，`barcode` 可以是 `0`，并写入 `barcode_status: "not_visible"`。
 
 若本机安装了 `tesseract` 且含 `eng+chi_sim` 语言包，真实 pipeline 会用 OCR TSV 词框增强文字区域检测；没有 OCR 时自动退回几何/边缘检测。JSON 还会写入：
 
 ```text
 medicine_box_method
+model_backend
+yolo_model_path
 quality_warnings
 pipeline_mode
 ocr_available
@@ -277,10 +315,14 @@ python3 scripts/evaluate_real_labelimg_pipeline.py \
 
 ```text
 prelabel audit: ok, 384 boxes, 0 problems
-mixed audit: ok, 624 boxes, 0 problems
+mixed audit: ok, 1097 boxes, 0 problems
 real val no OCR: macro_f1=0.5444, mAP50_proxy=0.5044
 real val OCR:    macro_f1=0.6278, mAP50_proxy=0.5367
 mirrored sample: orientation=mirrored, medicine_box=1, text=6, barcode_status=not_visible
+YOLO final mixed train: 10 epochs, val mAP50=0.99486, mAP50-95=0.88033
+YOLO real val pipeline: macro_f1=0.7636, mAP50_proxy=0.6752, miss_rate=0.0111, mean_latency_ms=1474.33
+YOLO real frame_00059: backend=yolo_hybrid, orientation=normal, medicine_box=1, text=6, barcode_status=not_visible
+YOLO mirrored frame_00059: backend=yolo_hybrid, orientation=mirrored, medicine_box=1, text=7, barcode_status=not_visible
 ```
 
 可单独用于 YOLO 文本区域微调：
@@ -307,7 +349,44 @@ YOLOv8n 训练路线（可选，需要自行安装 `ultralytics`）：
 
 ```bash
 python3 -m pip install -r requirements-yolo.txt
-python3 scripts/train_host_detector.py --build-mixed --try-yolo-mixed --epochs 30 --yolo-device mps
+python3 scripts/train_host_detector.py \
+  --train-count 80 \
+  --val-count 20 \
+  --test-count 20 \
+  --output out/models_yolo_final \
+  --dataset-output out/host_training_yolo_final \
+  --build-mixed \
+  --mixed-output out/host_training_mixed_yolo_final/yolo_dataset \
+  --try-yolo-mixed \
+  --epochs 30 \
+  --yolo-device mps
+```
+
+快速验收版（时间短，用于确认链路能跑）：
+
+```bash
+python3 scripts/train_host_detector.py \
+  --train-count 20 \
+  --val-count 6 \
+  --test-count 6 \
+  --output out/models_yolo_acceptance \
+  --dataset-output out/host_training_yolo_acceptance \
+  --build-mixed \
+  --mixed-output out/host_training_mixed_yolo_acceptance/yolo_dataset \
+  --try-yolo-mixed \
+  --epochs 1 \
+  --yolo-device mps
+```
+
+YOLO pipeline 在真实 LabelImg val split 上评估：
+
+```bash
+python3 scripts/evaluate_real_labelimg_pipeline.py \
+  --data data/real_labelimg_yolo_prelabelled/data.yaml \
+  --split val \
+  --output out/real_yolo_pipeline_eval/metrics.json \
+  --yolo-model out/models_yolo_final/yolo/medicine_box_mixed/weights/best.pt \
+  --yolo-device mps
 ```
 
 真实微调路线：
@@ -383,8 +462,8 @@ python3 scripts/audit_yolo_dataset.py --data data/real_labelimg_yolo_prelabelled
 python3 scripts/build_host_training_dataset.py --clean --train-count 12 --val-count 4 --test-count 4
 python3 scripts/train_host_detector.py --train-count 12 --val-count 4 --test-count 4 --build-mixed
 python3 scripts/run_host_synthetic_demo.py --force-train --demo-count 2
-python3 scripts/run_real_image_pipeline.py --image data/real_labelimg_yolo/images/train/frame_00059.jpg --output out/real_frame59_check
-python3 scripts/evaluate_real_labelimg_pipeline.py --data data/real_labelimg_yolo_prelabelled/data.yaml --split val
+python3 scripts/run_real_image_pipeline.py --image data/real_labelimg_yolo/images/train/frame_00059.jpg --output out/real_frame59_check --yolo-device mps
+python3 scripts/evaluate_real_labelimg_pipeline.py --data data/real_labelimg_yolo_prelabelled/data.yaml --split val --yolo-device mps
 python3 scripts/evaluate_host_synthetic_detector.py
 python3 scripts/evaluate_realistic_synthetic.py --test-count 4
 ```
@@ -392,7 +471,7 @@ python3 scripts/evaluate_realistic_synthetic.py --test-count 4
 ## 已知限制
 
 - 默认 demo 针对生成图，保证可复现，不代表真实药盒照片泛化能力。
-- 真实图片 pipeline 是 deterministic detector + 可选 OCR text boxes + 训练 profile；没有足够真实人工 `medicine_box/barcode/text` 标注前，不能保证所有药盒都精准。
+- 真实图片 pipeline 现在是 YOLOv8n 优先 + deterministic detector 补框/回退 + 可选 OCR text boxes；没有足够真实人工 `medicine_box/barcode/text` 标注前，不能保证所有药盒都精准。
 - `data/real_labelimg_yolo_prelabelled` 的 `medicine_box` 是自动预标注，适合 warm-start 和检查，不应当当作最终人工真值。
 - 当前真实 LabelImg 数据没有 barcode 框；真实 pipeline 对 barcode 采用保守策略，避免把文字误报成条码。
 - 当前不要求 Grove 硬件接入，不验证串口 probe/invoke/flash。

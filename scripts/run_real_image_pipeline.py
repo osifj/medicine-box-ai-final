@@ -21,12 +21,97 @@ import run_host_synthetic_demo as synth  # noqa: E402
 
 
 ORIENTATION_ORDER = ("normal", "rotated_180", "mirrored", "mirrored_rotated")
+YOLO_CLASS_NAMES = {0: "medicine_box", 1: "barcode", 2: "text"}
+DEFAULT_YOLO_MODEL_PATHS = (
+    Path("out/models_yolo_final/yolo/medicine_box_mixed/weights/best.pt"),
+    Path("out/models_yolo_path_smoke/yolo/medicine_box_mixed/weights/best.pt"),
+)
 
 
-def make_real_detection(label: str, score: float, box: list[int], width: int, height: int, text_hint: str = "") -> dict[str, Any]:
+def make_real_detection(
+    label: str,
+    score: float,
+    box: list[int],
+    width: int,
+    height: int,
+    text_hint: str = "",
+    source: str = "real_visual_detector",
+) -> dict[str, Any]:
     detection = synth.make_detection(label, score, box, width, height, text_hint=text_hint)
-    detection["source"] = "real_visual_detector"
+    detection["source"] = source
     return detection
+
+
+def resolve_yolo_model_path(model_path: Path | None = None) -> Path | None:
+    if model_path is not None:
+        expanded = model_path.expanduser()
+        return expanded if expanded.exists() else None
+    for candidate in DEFAULT_YOLO_MODEL_PATHS:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_yolo_detector(model_path: Path | None, disabled: bool = False) -> tuple[Any | None, dict[str, Any]]:
+    if disabled:
+        return None, {"status": "disabled", "path": ""}
+    resolved = resolve_yolo_model_path(model_path)
+    if resolved is None:
+        return None, {
+            "status": "missing",
+            "path": str(model_path.expanduser()) if model_path else "",
+            "searched": [str(path) for path in DEFAULT_YOLO_MODEL_PATHS],
+        }
+    try:
+        from ultralytics import YOLO  # type: ignore
+    except Exception as exc:
+        return None, {"status": "unavailable", "path": str(resolved), "error": str(exc)}
+    try:
+        return YOLO(str(resolved)), {"status": "loaded", "path": str(resolved)}
+    except Exception as exc:
+        return None, {"status": "failed", "path": str(resolved), "error": str(exc)}
+
+
+def clipped_xyxy(values: list[float], width: int, height: int) -> list[int]:
+    x1, y1, x2, y2 = values
+    ix1 = max(0, min(width - 1, int(round(x1))))
+    iy1 = max(0, min(height - 1, int(round(y1))))
+    ix2 = max(ix1 + 1, min(width, int(round(x2))))
+    iy2 = max(iy1 + 1, min(height, int(round(y2))))
+    return [ix1, iy1, ix2, iy2]
+
+
+def yolo_result_detections(result: Any, width: int, height: int) -> list[dict[str, Any]]:
+    boxes = getattr(result, "boxes", None)
+    if boxes is None:
+        return []
+    try:
+        cls_values = boxes.cls.detach().cpu().numpy().tolist()
+        conf_values = boxes.conf.detach().cpu().numpy().tolist()
+        xyxy_values = boxes.xyxy.detach().cpu().numpy().tolist()
+    except Exception:
+        return []
+
+    detections: list[dict[str, Any]] = []
+    for class_id, confidence, raw_box in zip(cls_values, conf_values, xyxy_values):
+        label = YOLO_CLASS_NAMES.get(int(class_id))
+        if label is None:
+            continue
+        box = clipped_xyxy([float(value) for value in raw_box], width, height)
+        if synth.box_area(box) < 12:
+            continue
+        detections.append(
+            make_real_detection(
+                label,
+                float(confidence),
+                box,
+                width,
+                height,
+                text_hint=f"yolo_{label}",
+                source="yolo",
+            )
+        )
+    return detections
 
 
 def mask_saturation(arr: np.ndarray) -> np.ndarray:
@@ -405,6 +490,100 @@ def detect_candidate(image: Image.Image, orientation: str, use_ocr: bool = True)
     }
 
 
+def label_count(detections: list[dict[str, Any]], label: str) -> int:
+    return sum(1 for detection in detections if detection["label"] == label)
+
+
+def merge_supplemental_detections(
+    primary: list[dict[str, Any]],
+    supplemental: list[dict[str, Any]],
+    max_text: int = 8,
+) -> list[dict[str, Any]]:
+    merged = list(primary)
+    for detection in supplemental:
+        label = detection["label"]
+        if label == "medicine_box" and label_count(merged, "medicine_box") >= 1:
+            continue
+        if label == "barcode" and label_count(merged, "barcode") >= 3:
+            continue
+        if label == "text" and label_count(merged, "text") >= max_text:
+            continue
+        if all(
+            old["label"] != label or synth.iou(detection["bbox_xyxy"], old["bbox_xyxy"]) < 0.35
+            for old in merged
+        ):
+            merged.append(detection)
+    return sorted(merged, key=lambda item: (item["label"] != "medicine_box", item["bbox_xyxy"][1], item["bbox_xyxy"][0]))
+
+
+def detect_yolo_candidate(
+    image: Image.Image,
+    orientation: str,
+    yolo_model: Any,
+    yolo_device: str = "",
+    use_ocr: bool = True,
+) -> dict[str, Any]:
+    transformed = synth.transform_image_orientation(image, orientation).convert("RGB")
+    width, height = transformed.size
+    try:
+        kwargs: dict[str, Any] = {
+            "source": np.asarray(transformed),
+            "imgsz": 640,
+            "conf": 0.05,
+            "iou": 0.5,
+            "max_det": 24,
+            "verbose": False,
+        }
+        if yolo_device:
+            kwargs["device"] = yolo_device
+        prediction = yolo_model.predict(**kwargs)
+        yolo_detections = yolo_result_detections(prediction[0], width, height) if prediction else []
+        yolo_error = ""
+    except Exception as exc:
+        yolo_detections = []
+        yolo_error = str(exc)
+
+    visual = detect_candidate(image, orientation, use_ocr=use_ocr)
+    detections = merge_supplemental_detections(yolo_detections, visual["detections"])
+    text_count = label_count(detections, "text")
+    barcode_count = label_count(detections, "barcode")
+    medicine_count = label_count(detections, "medicine_box")
+    yolo_text = label_count(yolo_detections, "text")
+    yolo_medicine = label_count(yolo_detections, "medicine_box")
+    yolo_barcode = label_count(yolo_detections, "barcode")
+    yolo_conf_score = sum(float(item["score"]) for item in yolo_detections)
+    score = (
+        visual["score"]
+        + yolo_conf_score * 1.8
+        + min(yolo_text, 8) * 0.65
+        + yolo_medicine * 2.4
+        + yolo_barcode * 0.45
+    )
+    if yolo_error:
+        score -= 2.0
+    if medicine_count == 0:
+        score -= 4.0
+    return {
+        "orientation": orientation,
+        "score": round(score, 4),
+        "image": transformed,
+        "detections": detections,
+        "text_count": text_count,
+        "barcode_count": barcode_count,
+        "medicine_box_method": "yolo" if yolo_medicine else visual["medicine_box_method"],
+        "ocr_available": visual["ocr_available"],
+        "ocr_lines": visual["ocr_lines"],
+        "model_backend": "yolo_hybrid",
+        "yolo_error": yolo_error,
+        "yolo_counts": {
+            "medicine_box": yolo_medicine,
+            "barcode": yolo_barcode,
+            "text": yolo_text,
+        },
+        "yolo_detection_count": len(yolo_detections),
+    }
+
+
 def draw_overlay(image: Image.Image, detections: list[dict[str, Any]], out_path: Path) -> None:
     draw = ImageDraw.Draw(image)
     colors = {"medicine_box": (0, 120, 255), "barcode": (30, 170, 70), "text": (230, 150, 0)}
@@ -437,7 +616,7 @@ def load_model_metadata(model_dir: Path) -> dict[str, Any]:
     return {"loaded_from": "", "status": "deterministic_fallback"}
 
 
-def quality_warnings(best: dict[str, Any], barcode_status: str) -> list[str]:
+def quality_warnings(best: dict[str, Any], barcode_status: str, yolo_status: dict[str, Any] | None = None) -> list[str]:
     warnings: list[str] = []
     if best.get("medicine_box_method") in {"central_fallback", "full_image_fallback"}:
         warnings.append("medicine_box_used_fallback_estimate")
@@ -447,10 +626,24 @@ def quality_warnings(best: dict[str, Any], barcode_status: str) -> list[str]:
         warnings.append("barcode_not_visible_or_not_detected")
     if not best["ocr_available"]:
         warnings.append("ocr_engine_not_available")
+    if yolo_status and yolo_status.get("status") not in {"loaded", "disabled"}:
+        warnings.append(f"yolo_{yolo_status.get('status', 'unknown')}")
+    if best.get("model_backend") == "deterministic_fallback" and yolo_status and yolo_status.get("status") == "loaded":
+        warnings.append("yolo_loaded_but_not_used")
+    if best.get("yolo_error"):
+        warnings.append("yolo_prediction_error")
     return warnings
 
 
-def run_pipeline(image_path: Path, output_dir: Path, model_dir: Path | None = None) -> dict[str, Any]:
+def run_pipeline(
+    image_path: Path,
+    output_dir: Path,
+    model_dir: Path | None = None,
+    yolo_model_path: Path | None = None,
+    yolo_device: str = "",
+    prefer_yolo: bool = True,
+    no_yolo: bool = False,
+) -> dict[str, Any]:
     started = time.perf_counter()
     output_dir = synth.ensure_dir(output_dir)
     results_dir = synth.ensure_dir(output_dir / "results")
@@ -458,10 +651,33 @@ def run_pipeline(image_path: Path, output_dir: Path, model_dir: Path | None = No
     model_metadata = load_model_metadata(model_dir)
     image = Image.open(image_path).convert("RGB")
 
-    candidates = [detect_candidate(image, orientation) for orientation in ORIENTATION_ORDER]
-    best = max(candidates, key=lambda item: item["score"])
+    yolo_model, yolo_status = load_yolo_detector(yolo_model_path, disabled=no_yolo or not prefer_yolo)
+    if yolo_model is not None:
+        candidates = [
+            detect_yolo_candidate(image, orientation, yolo_model, yolo_device=yolo_device)
+            for orientation in ORIENTATION_ORDER
+        ]
+        usable = [
+            item
+            for item in candidates
+            if item.get("yolo_detection_count", 0) > 0
+            and label_count(item["detections"], "medicine_box") >= 1
+            and label_count(item["detections"], "text") >= 1
+        ]
+        if usable:
+            backend = "yolo_hybrid"
+            best = max(usable, key=lambda item: item["score"])
+        else:
+            backend = "deterministic_fallback"
+            candidates = [detect_candidate(image, orientation) for orientation in ORIENTATION_ORDER]
+            best = max(candidates, key=lambda item: item["score"])
+    else:
+        backend = "deterministic_fallback"
+        candidates = [detect_candidate(image, orientation) for orientation in ORIENTATION_ORDER]
+        best = max(candidates, key=lambda item: item["score"])
+    best["model_backend"] = backend
     barcode_status = "detected" if best["barcode_count"] else "not_visible"
-    warnings = quality_warnings(best, barcode_status)
+    warnings = quality_warnings(best, barcode_status, yolo_status)
 
     stem = image_path.stem
     corrected_path = results_dir / f"{stem}_corrected.jpg"
@@ -476,6 +692,8 @@ def run_pipeline(image_path: Path, output_dir: Path, model_dir: Path | None = No
         "image": str(image_path),
         "corrected_image": str(corrected_path),
         "overlay": str(overlay_path),
+        "model_backend": backend,
+        "yolo_model_path": yolo_status.get("path", ""),
         "orientation": best["orientation"],
         "orientation_candidates": [
             {
@@ -484,13 +702,16 @@ def run_pipeline(image_path: Path, output_dir: Path, model_dir: Path | None = No
                 "text_count": item["text_count"],
                 "barcode_count": item["barcode_count"],
                 "medicine_box_method": item["medicine_box_method"],
+                "model_backend": item.get("model_backend", backend),
+                "yolo_counts": item.get("yolo_counts", {}),
+                "yolo_detection_count": item.get("yolo_detection_count", 0),
             }
             for item in candidates
         ],
         "barcode_status": barcode_status,
         "medicine_box_method": best["medicine_box_method"],
         "quality_warnings": warnings,
-        "pipeline_mode": "deterministic_real_visual_with_optional_model_metadata",
+        "pipeline_mode": "real_image_yolo_hybrid" if backend == "yolo_hybrid" else "deterministic_real_visual",
         "counts": {
             label: sum(1 for det in best["detections"] if det["label"] == label)
             for label in synth.REQUIRED_LABELS
@@ -498,13 +719,13 @@ def run_pipeline(image_path: Path, output_dir: Path, model_dir: Path | None = No
         "detections": best["detections"],
         "ocr_available": best["ocr_available"],
         "ocr_lines": best["ocr_lines"],
-        "model": model_metadata,
+        "model": model_metadata | {"yolo": yolo_status},
         "latency_ms": round(elapsed_ms, 2),
-        "note": "Real-image pipeline uses optional OCR scoring, trained/fallback model metadata, and deterministic visual detection.",
+        "note": "Real-image pipeline prefers YOLOv8n when a trained weight exists, then supplements/falls back with deterministic visual detection and optional OCR scoring.",
     }
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
-        f"REAL {image_path.name}: orientation={result['orientation']} "
+        f"REAL {image_path.name}: backend={backend} orientation={result['orientation']} "
         f"medicine_box={result['counts']['medicine_box']} text={result['counts']['text']} "
         f"barcode={result['counts']['barcode']} barcode_status={barcode_status}"
     )
@@ -518,12 +739,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", default="out/real_image_check")
     parser.add_argument("--model-dir", default="out/models")
+    parser.add_argument("--yolo-model", default="", help="Path to YOLOv8 best.pt; defaults to out/models_yolo_final then smoke weight")
+    parser.add_argument("--yolo-device", default="", help="YOLO device, for example mps/cpu/cuda")
+    parser.add_argument("--prefer-yolo", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--no-yolo", action="store_true", help="Disable YOLO and force deterministic fallback")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    result = run_pipeline(Path(args.image), Path(args.output), Path(args.model_dir))
+    result = run_pipeline(
+        Path(args.image),
+        Path(args.output),
+        Path(args.model_dir),
+        yolo_model_path=Path(args.yolo_model) if args.yolo_model else None,
+        yolo_device=args.yolo_device,
+        prefer_yolo=args.prefer_yolo,
+        no_yolo=args.no_yolo,
+    )
     return 0 if result["counts"]["medicine_box"] >= 1 and result["counts"]["text"] >= 1 else 1
 
 

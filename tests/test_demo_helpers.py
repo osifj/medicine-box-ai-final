@@ -82,12 +82,57 @@ class SyntheticDemoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             record = demo.generate_dataset(root / "demo", count=1, seed=20260601, prefix="demo")[0]
-            result = real.run_pipeline(Path(record["image"]), root / "real_check", root / "models")
+            result = real.run_pipeline(Path(record["image"]), root / "real_check", root / "models", no_yolo=True)
             self.assertGreaterEqual(result["counts"]["medicine_box"], 1)
             self.assertGreaterEqual(result["counts"]["text"], 1)
             self.assertIn(result["barcode_status"], {"detected", "not_visible"})
             self.assertIn(result["orientation"], set(real.ORIENTATION_ORDER))
             self.assertIn("quality_warnings", result)
+            self.assertEqual(result["model_backend"], "deterministic_fallback")
+            self.assertIn("yolo_model_path", result)
+
+    def test_real_pipeline_missing_yolo_falls_back(self) -> None:
+        demo = load_script("run_host_synthetic_demo")
+        real = load_script("run_real_image_pipeline")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = demo.generate_dataset(root / "demo", count=1, seed=20260602, prefix="demo")[0]
+            result = real.run_pipeline(
+                Path(record["image"]),
+                root / "real_missing_yolo",
+                root / "models",
+                yolo_model_path=root / "missing_best.pt",
+            )
+            self.assertEqual(result["model_backend"], "deterministic_fallback")
+            self.assertEqual(result["model"]["yolo"]["status"], "missing")
+            self.assertTrue(any("yolo_missing" == warning for warning in result["quality_warnings"]))
+            self.assertGreaterEqual(result["counts"]["medicine_box"], 1)
+
+    def test_real_pipeline_no_yolo_json_contract(self) -> None:
+        demo = load_script("run_host_synthetic_demo")
+        real = load_script("run_real_image_pipeline")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = demo.generate_dataset(root / "demo", count=1, seed=20260603, prefix="demo")[0]
+            result = real.run_pipeline(Path(record["image"]), root / "real_no_yolo", no_yolo=True)
+            required = {
+                "model_backend",
+                "yolo_model_path",
+                "orientation",
+                "barcode_status",
+                "quality_warnings",
+                "counts",
+                "detections",
+            }
+            self.assertTrue(required.issubset(result))
+            self.assertEqual(result["model_backend"], "deterministic_fallback")
+            for item in result["detections"]:
+                self.assertIn("label", item)
+                self.assertIn("score", item)
+                self.assertIn("bbox_xyxy", item)
+                self.assertIn("bbox_xywh", item)
+                self.assertIn("text_hint", item)
+                self.assertIn("source", item)
 
     def test_audit_yolo_dataset_valid(self) -> None:
         audit = load_script("audit_yolo_dataset")
